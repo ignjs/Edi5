@@ -1,3 +1,19 @@
+# Bloques horarios del gimnasio
+BLOCKS = [
+    "08:00-09:00",
+    "09:00-10:00",
+    "10:00-11:00",
+    "11:00-12:00",
+    "12:00-13:00",
+    "13:00-14:00",
+    "14:00-15:00",
+    "15:00-16:00",
+    "16:00-17:00",
+    "17:00-18:00",
+    "18:00-19:00",
+    "19:00-20:00",
+    "20:00-21:00"
+]
 from fastapi import FastAPI, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -5,6 +21,7 @@ from typing import Optional
 import psycopg2
 import os
 from dotenv import load_dotenv
+from datetime import date
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 from passlib.context import CryptContext
@@ -98,6 +115,148 @@ class CommonReservationRequest(BaseModel):
     resource_id: int
     date: str  # formato 'YYYY-MM-DD'
     attendees: int
+
+@app.post("/api/reserve/gym")
+def reserve_gym(req: GymReservationRequest):
+    try:
+        start, end = req.block.split("-")
+        today = date.today().isoformat()
+        start_time = f"{today}T{start}:00"
+        end_time = f"{today}T{end}:00"
+    except Exception:
+        raise HTTPException(status_code=400, detail="Bloque horario inválido")
+
+    if req.attendees < 1 or req.attendees > 2:
+        raise HTTPException(status_code=400, detail="Máximo 2 personas por departamento")
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            try:
+                # 1. Verificar si el departamento ya tiene una reserva en CUALQUIER bloque hoy
+                cur.execute(
+                    """
+                    SELECT id, start_time, attendees FROM reservations 
+                    WHERE res_id=1 AND dept_id=%s 
+                    AND start_time >= %s AND start_time <= %s
+                    """,
+                    (req.dept_id, f"{today}T00:00:00", f"{today}T23:59:59")
+                )
+                existing_res = cur.fetchone()
+
+                if existing_res:
+                    res_id, res_start, res_attendees = existing_res
+                    # Si la reserva existente es en un bloque DIFERENTE al solicitado, bloqueamos
+                    # Comparamos solo la parte de la hora del ISOstring
+                    existing_hour = res_start.strftime("%H:%M") # "08:00"
+                    if existing_hour != start:
+                        raise HTTPException(
+                            status_code=400, 
+                            detail=f"Ya tienes una reserva en el bloque {existing_hour}. Elimínala para cambiar de horario."
+                        )
+                    
+                    # Si es el MISMO bloque, validamos aforo y actualizamos
+                    # (Esto permite pasar de 1 a 2 personas en el mismo bloque)
+                    cur.execute(
+                        "SELECT COALESCE(SUM(attendees),0) FROM reservations WHERE start_time=%s AND res_id=1 AND id != %s",
+                        (start_time, res_id)
+                    )
+                    others_total = cur.fetchone()[0]
+                    
+                    if others_total + req.attendees > 3:
+                        raise HTTPException(status_code=400, detail="Aforo total del bloque superado")
+
+                    cur.execute(
+                        "UPDATE reservations SET attendees=%s WHERE id=%s",
+                        (req.attendees, res_id)
+                    )
+                    conn.commit()
+                    return {"ok": True, "message": "Reserva actualizada"}
+
+                # 2. Si no hay reserva previa, procedemos con inserción normal
+                # Validar aforo total del bloque (máx 3)
+                cur.execute(
+                    "SELECT COALESCE(SUM(attendees),0) FROM reservations WHERE start_time=%s AND res_id=1",
+                    (start_time,)
+                )
+                total_in_block = cur.fetchone()[0]
+
+                if total_in_block + req.attendees > 3:
+                    raise HTTPException(status_code=400, detail="Aforo total del bloque superado")
+
+                cur.execute(
+                    """
+                    INSERT INTO reservations (res_id, dept_id, start_time, end_time, attendees)
+                    VALUES (1, %s, %s, %s, %s)
+                    """,
+                    (req.dept_id, start_time, end_time, req.attendees),
+                )
+                conn.commit()
+                return {"ok": True, "message": "Reserva creada"}
+
+            except HTTPException as he:
+                raise he
+            except Exception as e:
+                conn.rollback()
+                raise HTTPException(status_code=500, detail=f"Error interno: {e}")
+
+@app.put("/api/reserve/gym/{res_id}")
+def update_gym_reservation(res_id: int, req: GymReservationRequest):
+    """
+    Endpoint específico para actualizaciones desde el panel lateral del Gym
+    """
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            # Validar que la reserva exista
+            cur.execute("SELECT start_time FROM reservations WHERE id=%s", (res_id,))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Reserva no encontrada")
+            
+            start_time = row[0]
+            
+            # Validar aforo de otros
+            cur.execute(
+                "SELECT COALESCE(SUM(attendees),0) FROM reservations WHERE start_time=%s AND res_id=1 AND id != %s",
+                (start_time, res_id)
+            )
+            others_total = cur.fetchone()[0]
+
+            if others_total + req.attendees > 3:
+                raise HTTPException(status_code=400, detail="Aforo excedido")
+
+            cur.execute("UPDATE reservations SET attendees=%s WHERE id=%s", (req.attendees, res_id))
+            conn.commit()
+            return {"ok": True}
+
+# Modificación en el GET de disponibilidad para facilitar el consumo del front
+@app.get("/api/reserve/gym/availability")
+def get_gym_availability(date: Optional[str] = Query(None)):
+    if not date:
+        from datetime import date as dt_date
+        date = dt_date.today().isoformat()
+    
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT start_time, SUM(attendees)
+                FROM reservations
+                WHERE res_id=1 AND start_time::date = %s
+                GROUP BY start_time
+                """,
+                (date,)
+            )
+            rows = cur.fetchall()
+            # Retorna un diccionario { "08:00-09:00": ocupados }
+            availability = {}
+            for r in rows:
+                # r[0] es un datetime -> extraemos "08:00"
+                time_str = r[0].strftime("%H:%M")
+                # Buscamos a qué bloque pertenece
+                for b in BLOCKS:
+                    if b.startswith(time_str):
+                        availability[b] = int(r[1])
+            return availability
 
 
 
@@ -465,70 +624,6 @@ def get_common_reservations(
 @app.get("/")
 def read_root():
     return {"message": "Bienvenido a BuildingFlow API"}
-
-
-@app.post("/api/reserve/gym")
-def reserve_gym(req: GymReservationRequest):
-    # Validación de bloque horario
-    try:
-        start, end = req.block.split("-")
-        date = req.block_date if hasattr(req, "block_date") else None
-        if not date:
-            from datetime import date as dt
-
-            date = dt.today().isoformat()
-        start_time = f"{date}T{start}:00"
-        end_time = f"{date}T{end}:00"
-    except Exception:
-        raise HTTPException(status_code=400, detail="Bloque horario inválido")
-    if req.attendees < 1 or req.attendees > 2:
-        raise HTTPException(
-            status_code=400, detail="Máximo 2 personas por departamento"
-        )
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            try:
-                conn.autocommit = False
-                # 1. Total de personas en el bloque
-                cur.execute(
-                    """
-                    SELECT COALESCE(SUM(attendees),0) FROM reservations
-                    WHERE start_time=%s AND res_id=1
-                    """,
-                    (start_time,),
-                )
-                total = cur.fetchone()[0]
-                # 2. Personas de este depto en el bloque
-                cur.execute(
-                    """
-                    SELECT COALESCE(SUM(attendees),0) FROM reservations
-                    WHERE start_time=%s AND res_id=1 AND dept_id=%s
-                    """,
-                    (start_time, req.dept_id),
-                )
-                dept_total = cur.fetchone()[0]
-                if total + req.attendees > 3:
-                    raise HTTPException(
-                        status_code=400, detail="Aforo total del bloque superado"
-                    )
-                if dept_total + req.attendees > 2:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Máximo 2 personas por departamento en este bloque",
-                    )
-                # Insertar reserva
-                cur.execute(
-                    """
-                    INSERT INTO reservations (res_id, dept_id, start_time, end_time, attendees)
-                    VALUES (1, %s, %s, %s, %s)
-                    """,
-                    (req.dept_id, start_time, end_time, req.attendees),
-                )
-                conn.commit()
-                return {"ok": True}
-            except Exception as e:
-                conn.rollback()
-                raise HTTPException(status_code=500, detail=f"Error al reservar: {e}")
 
 
 @app.post("/api/reserve/common")

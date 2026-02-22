@@ -1,0 +1,53 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Fondo extraído de las sombras de las dunas */
+  --carbon: #1A161D;       
+  --graphite: #251F29;     
+  --border: #362E3A;       
+  /* Acentos de la imagen: Naranja Duna y Púrpura Ocaso */
+  --dune-orange: #C26B4E;  
+  --sunset-purple: #7B5C7E; 
+}
+
+body {
+  /* Fondo no negro, sino púrpura profundo desaturado */
+  @apply bg-[#1A161D] text-[#EEEEEE] antialiased;
+  font-family: 'Inter', ui-sans-serif, system-ui;
+  letter-spacing: -0.02em;
+}
+
+.container-glass {
+  /* Tarjetas con matiz de color y borde sutil */
+  @apply bg-[#251F29] border border-[#362E3A] rounded-2xl shadow-2xl transition-all duration-300;
+  background-image: radial-gradient(circle at top left, rgba(194, 107, 78, 0.05), transparent);
+}
+
+.heading {
+  @apply font-bold tracking-tighter text-[#EEEEEE];
+}
+
+/* Botones con la nueva paleta */
+.slot-btn {
+  @apply w-full py-3 rounded-xl font-bold text-xs uppercase tracking-widest transition-all duration-300 active:scale-[0.98];
+}
+
+.slot-empty {
+  @apply bg-[#1A161D] border border-[#362E3A] text-[#888888] hover:border-[#C26B4E] hover:text-[#EEEEEE];
+}
+
+.slot-one-third {
+  @apply border-[#7B5C7E]/40 bg-[#7B5C7E]/5 text-[#A68BA8] hover:bg-[#7B5C7E]/20;
+}
+
+.slot-two-third {
+  @apply border-[#C26B4E]/40 bg-[#C26B4E]/5 text-[#C26B4E] hover:bg-[#C26B4E]/20;
+}
+
+.slot-full {
+  @apply bg-[#141116] border-[#251F29] text-zinc-600 cursor-not-allowed opacity-50 line-through;
+}
